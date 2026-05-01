@@ -10,8 +10,8 @@ const pendingTransactions = new Map()
 
 class MpesaService {
   constructor() {
-    this.baseUrl = process.env.MPESA_ENV === 'production' 
-      ? 'https://api.safaricom.co.ke' 
+    this.baseUrl = process.env.MPESA_ENV === 'production'
+      ? 'https://api.safaricom.co.ke'
       : 'https://sandbox.safaricom.co.ke'
   }
 
@@ -19,6 +19,7 @@ class MpesaService {
     const auth = Buffer.from(
       `${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`
     ).toString('base64')
+
     const response = await axios.get(
       `${this.baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
       { headers: { Authorization: `Basic ${auth}` } }
@@ -46,11 +47,6 @@ class MpesaService {
 
   async sendSTKPush({ phone, amount, userId, description }) {
     try {
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      if (!userId || !uuidRegex.test(userId)) {
-        return { success: false, message: 'Invalid user ID' }
-      }
-
       const token = await this.getAccessToken()
       const timestamp = this.getTimestamp()
       const password = this.getPassword(timestamp)
@@ -120,7 +116,8 @@ class MpesaService {
             phone_number: phone || transaction.phone,
             status: 'completed',
             mpesa_receipt: mpesaReceipt,
-            checkout_request_id: checkoutRequestId
+            transaction_type: 'deposit',
+            metadata: { checkoutRequestId }
           })
         }
 
@@ -134,6 +131,15 @@ class MpesaService {
         if (transaction) {
           transaction.status = 'failed'
           pendingTransactions.set(checkoutRequestId, transaction)
+
+          await supabase.from('payments').insert({
+            user_id: transaction.userId,
+            amount: transaction.amount,
+            phone_number: transaction.phone,
+            status: 'failed',
+            transaction_type: 'deposit',
+            metadata: { checkoutRequestId, error: body.ResultDesc }
+          })
         }
         return { status: 'failed', message: body.ResultDesc }
       }
