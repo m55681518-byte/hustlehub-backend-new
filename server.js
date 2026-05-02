@@ -29,6 +29,10 @@ app.use('/stkpush', stkpushRoute)
 app.use('/callback', callbackRoute)
 app.use('/payment-status', statusRoute)
 
+// AI route
+const aiRoute = require('./routes/ai')
+app.use('/ai', aiRoute)
+
 // App routes
 const hustlesRoute = require('./routes/hustles')
 const profilesRoute = require('./routes/profiles')
