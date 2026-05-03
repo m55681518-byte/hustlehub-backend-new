@@ -1,60 +1,112 @@
-const express = require('express')
-const router  = express.Router()
-const axios   = require('axios')
+const express = require('express');
+const router = express.Router();
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const SYSTEM_PROMPT = `You are HustleBot, an AI assistant built into HustleHub — a Kenyan gig marketplace where people post and find short-term work called "hustles".
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-Your job is to help users:
-- Find the right hustle for their skills
-- Write compelling hustle descriptions that attract quality applicants
-- Give advice on fair pricing for different types of work in Kenya
-- Explain how to apply for hustles successfully
-- Give tips on completing hustles and building a strong reputation
-- Help premium users generate full hustle listings from a brief idea
-
-Be friendly, practical, and brief. Speak like a helpful Kenyan friend who knows the local job market. Use simple English. Occasionally use phrases like "sawa", "poa", "hakuna matata" where natural. Keep answers to 2-4 sentences unless the user asks for more detail.
-
-If someone asks you to write a hustle, respond with a JSON object in this exact format:
-{"title":"...","category":"...","description":"...","payout_amount":...,"location":"..."}
-
-If asked anything unrelated to work or the app, redirect kindly.`
-
-// POST /ai/chat — proxies to Groq, keeps API key server-side
-router.post('/chat', async (req, res) => {
-  try {
-    const { messages, isPremium } = req.body
-
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ success: false, message: 'Messages array required' })
+const providers = [
+  {
+    name: 'Gemini (Primary)',
+    call: async (msg, hist, inst) => {
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash", systemInstruction: inst });
+      const result = await model.startChat({ history: hist }).sendMessage(msg);
+      return result.response.text();
     }
-
-    const contextMessages = isPremium ? messages : messages.slice(-6)
-
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model:      'llama-3.3-70b-versatile',
-        max_tokens: isPremium ? 800 : 300,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...contextMessages.map(m => ({ role: m.role, content: m.content })),
-        ],
-      },
-      {
-        headers: {
-          'Content-Type':  'application/json',
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        },
-        timeout: 30000,
-      }
-    )
-
-    const reply = response.data.choices?.[0]?.message?.content || "Sorry, I couldn't get a response."
-    res.json({ success: true, reply })
-  } catch (error) {
-    console.error('AI chat error:', error.response?.data || error.message)
-    res.status(500).json({ success: false, message: 'AI service temporarily unavailable.' })
+  },
+  {
+    name: 'Groq (Backup 1)',
+    call: async (msg, hist, inst) => {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: "llama-3.3-70b-versatile", 
+          messages: [{ role: "system", content: inst }, { role: "user", content: msg }] 
+        })
+      });
+      const data = await res.json();
+      return data.choices[0].message.content;
+    }
+  },
+  {
+    name: 'OpenRouter (Backup 2)',
+    call: async (msg, hist, inst) => {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: "google/gemini-2.0-flash-exp:free", 
+          messages: [{ role: "system", content: inst }, { role: "user", content: msg }] 
+        })
+      });
+      const data = await res.json();
+      return data.choices[0].message.content;
+    }
+  },
+  {
+    name: 'Together AI (Backup 3)',
+    call: async (msg, hist, inst) => {
+      const res = await fetch("https://api.together.xyz/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.TOGETHER_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", 
+          messages: [{ role: "system", content: inst }, { role: "user", content: msg }] 
+        })
+      });
+      const data = await res.json();
+      return data.choices[0].message.content;
+    }
+  },
+  {
+    name: 'DeepSeek (Backup 4)',
+    call: async (msg, hist, inst) => {
+      const res = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: "deepseek-chat", 
+          messages: [{ role: "system", content: inst }, { role: "user", content: msg }] 
+        })
+      });
+      const data = await res.json();
+      return data.choices[0].message.content;
+    }
+  },
+  {
+    name: 'Hugging Face (Backup 5)',
+    call: async (msg) => {
+      const res = await fetch("https://api-inference.huggingface.co/models/mistralai/Mistral-7B-v0.1", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.HF_API_KEY}` },
+        body: JSON.stringify({ inputs: msg })
+      });
+      const data = await res.json();
+      // HF sometimes returns an array or a single object
+      return Array.isArray(data) ? data[0].generated_text : data.generated_text;
+    }
   }
-})
+];
 
-module.exports = router
+router.post('/chat', async (req, res) => {
+  const { message, history, systemInstruction } = req.body;
+  const validHistory = (history && history.length > 0 && history[0].role === 'user') ? history : [];
+
+  for (const provider of providers) {
+    try {
+      console.log(`>>> HustleBot attempting ${provider.name}...`);
+      const reply = await provider.call(message, validHistory, systemInstruction);
+      
+      // We return 'source' as well so you can see in the logs which one is working
+      return res.json({ reply, source: provider.name }); 
+    } catch (err) {
+      console.error(`${provider.name} failed:`, err.message);
+      // Fail silently and move to the next provider in the loop
+    }
+  }
+
+  // Final failsafe message if everything explodes
+  res.status(500).json({ reply: "My systems are having a moment. Give me a minute to reset!" });
+});
+
+module.exports = router;
