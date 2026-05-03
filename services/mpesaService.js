@@ -1,61 +1,47 @@
-// File: services/mpesaService.js
 const axios = require('axios')
-const { createClient } = require('@supabase/supabase-js')
-
-// Initialize Supabase Admin client[cite: 14]
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // Uses your secret key from Render[cite: 14]
-)
+const { supabaseAdmin } = require('../lib/supabase') // Point to the admin client
 
 const pendingTransactions = new Map()
 
 class MpesaService {
-  // ... (keep constructor, getAccessToken, getTimestamp, getPassword, formatPhone as is)[cite: 14]
+  constructor() {
+    this.baseUrl = process.env.MPESA_ENV === 'production'
+      ? 'https://api.safaricom.co.ke'
+      : 'https://sandbox.safaricom.co.ke'
+  }
+
+  // ... keep other helper functions (getAccessToken, etc)[cite: 12]
 
   async handleCallback(callbackData) {
     try {
       const body = callbackData.Body?.stkCallback || callbackData
-      const resultCode = body.ResultCode
-      const checkoutRequestId = body.CheckoutRequestID
-      const transaction = pendingTransactions.get(checkoutRequestId)
-
-      if (resultCode === 0) {
+      if (body.ResultCode === 0) {
+        const checkoutRequestId = body.CheckoutRequestID
+        const transaction = pendingTransactions.get(checkoutRequestId)
         const metadata = body.CallbackMetadata?.Item || []
-        const amountPaid = metadata.find(i => i.Name === 'Amount')?.Value
         const mpesaReceipt = metadata.find(i => i.Name === 'MpesaReceiptNumber')?.Value
-        
+
         if (transaction?.userId) {
-          // 1. Record the successful payment
-          await supabase.from('payments').insert({
+          // 1. Update Payment Record
+          await supabaseAdmin.from('payments').insert({
             user_id: transaction.userId,
-            amount: amountPaid || transaction.amount,
+            amount: transaction.amount,
             status: 'completed',
-            mpesa_receipt: mpesaReceipt,
-            transaction_type: 'deposit'
+            mpesa_receipt: mpesaReceipt
           })
 
-          // 2. CRITICAL: Flip the is_pro switch to true
-          // This allows App_7.js to stop showing ads
-          await supabase.from('profiles')
+          // 2. UNLOCK PRO STATUS[cite: 12]
+          await supabaseAdmin.from('profiles')
             .update({ is_pro: true })
             .eq('id', transaction.userId)
         }
-
-        if (transaction) {
-          transaction.status = 'success'
-          pendingTransactions.set(checkoutRequestId, transaction)
-        }
         return { status: 'success' }
-      } else {
-        // ... (keep existing failure logic)[cite: 14]
-        return { status: 'failed', message: body.ResultDesc }
       }
+      return { status: 'failed' }
     } catch (error) {
       return { status: 'error', message: error.message }
     }
   }
-  // ... (keep other functions)[cite: 14]
 }
 
 module.exports = new MpesaService()
